@@ -11,7 +11,7 @@ import {
   readOtpCodeFromBody,
   type RequestLike,
   type ResponseLike,
-} from '../_lib/otp';
+} from '../_lib/otp.js';
 
 function respondWithError(res: ResponseLike, error: unknown) {
   if (error instanceof HttpError) {

@@ -1,0 +1,6 @@
+{
+  "name": "Vertisa",
+  "description": "Secure authentication protocol with OTP verification.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

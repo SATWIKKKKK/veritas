@@ -1,222 +1,246 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { useNavigate, Navigate } from 'react-router-dom';
+﻿import React, { useEffect, useRef, useState } from 'react';
+import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { sendOtp, verifyOtp, ApiError } from '../lib/api';
 import { cn } from '../lib/utils';
-import { AlertCircle } from 'lucide-react';
+
+const RESEND_COOLDOWN = 60;
+
+interface OtpLocationState {
+  otpSent?: boolean;
+  debugCode?: string;
+}
 
 export default function OtpScreen() {
+  const { user, authToken, setOtpVerified, signOut } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const otpState = location.state as OtpLocationState | null;
+
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [timer, setTimer] = useState(45);
+  const [resendTimer, setResendTimer] = useState(() =>
+    otpState?.otpSent ? RESEND_COOLDOWN : 0,
+  );
+  const [resendLoading, setResendLoading] = useState(false);
+  const [debugCode, setDebugCode] = useState(otpState?.debugCode ?? '');
   const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-  const { confirmationResult } = useAuth();
-  const navigate = useNavigate();
 
-  // Redirect to login if no confirmationResult (user refreshed the page)
-  if (!confirmationResult) {
+  // Guard: must be Firebase-authenticated to reach this screen
+  if (!user || !authToken) {
     return <Navigate to="/login" replace />;
   }
 
   useEffect(() => {
-    // Focus first input on mount
-    if (inputRefs.current[0]) {
-      inputRefs.current[0].focus();
-    }
+    inputRefs.current[0]?.focus();
   }, []);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (timer > 0) {
-      interval = setInterval(() => {
-        setTimer((prev) => prev - 1);
-      }, 1000);
+    if (otpState?.otpSent === false) {
+      setError('We could not send a verification code yet. Try resending the code below.');
     }
+  }, [otpState?.otpSent]);
+
+  useEffect(() => {
+    if (resendTimer <= 0) return;
+    const interval = setInterval(() => setResendTimer((t) => Math.max(0, t - 1)), 1000);
     return () => clearInterval(interval);
-  }, [timer]);
+  }, [resendTimer]);
 
   const handleChange = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    if (isNaN(Number(value))) return;
-
+    const value = e.target.value.replace(/\D/g, '');
     const newOtp = [...otp];
-    // Take only the last character if multiple are pasted
-    newOtp[index] = value.substring(value.length - 1);
+    newOtp[index] = value.slice(-1);
     setOtp(newOtp);
     setError('');
-
-    // Auto-advance
-    if (value && index < 5 && inputRefs.current[index + 1]) {
-      inputRefs.current[index + 1]?.focus();
-    }
+    if (value && index < 5) inputRefs.current[index + 1]?.focus();
   };
 
   const handleKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Backspace' && !otp[index] && index > 0) {
       inputRefs.current[index - 1]?.focus();
-    } else if (e.key === 'Enter') {
-      handleVerify();
     }
+    if (e.key === 'Enter') void handleVerify();
   };
 
   const handlePaste = (e: React.ClipboardEvent) => {
     e.preventDefault();
-    const pastedData = e.clipboardData.getData('text').slice(0, 6).replace(/\D/g, '');
-    if (!pastedData) return;
-
+    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, 6);
+    if (!pasted) return;
     const newOtp = [...otp];
-    for (let i = 0; i < pastedData.length; i++) {
-        if(i < 6) newOtp[i] = pastedData[i];
-    }
+    pasted.split('').forEach((ch, i) => { if (i < 6) newOtp[i] = ch; });
     setOtp(newOtp);
-    
-    // Focus next empty input or last
-    const nextIndex = Math.min(pastedData.length, 5);
-    inputRefs.current[nextIndex]?.focus();
+    inputRefs.current[Math.min(pasted.length, 5)]?.focus();
   };
 
   const handleVerify = async () => {
     const code = otp.join('');
-    if (code.length !== 6) {
-      setError('Please enter all 6 digits.');
-      return;
-    }
+    if (code.length !== 6) { setError('Please enter all 6 digits.'); return; }
 
     setLoading(true);
     setError('');
-
     try {
-      if (!confirmationResult) throw new Error("No confirmation result.");
-      // This will automatically trigger onIdTokenChanged in AuthContext
-      await confirmationResult.confirm(code);
-      // Wait a moment for context to process token, though navigation is handled by PrivateRoute logic if we redirect
-      navigate('/home');
-    } catch (err: any) {
-      console.error(err);
-      if (err.code === 'auth/invalid-verification-code') {
-        setError('Invalid code. Please try again.');
-        setOtp(['', '', '', '', '', '']);
-        inputRefs.current[0]?.focus();
-      } else if (err.code === 'auth/code-expired') {
-        setError('Code expired. Please request a new one.');
-        setTimeout(() => navigate('/login'), 3000);
+      await verifyOtp(authToken, code);
+      setOtpVerified(true);
+      navigate('/home', { replace: true });
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
       } else {
-        setError(err.message || 'Verification failed.');
+        setError('Verification failed. Please try again.');
       }
+      setOtp(['', '', '', '', '', '']);
+      inputRefs.current[0]?.focus();
     } finally {
       setLoading(false);
     }
   };
 
-  const formattedTimer = `00:${timer < 10 ? '0' : ''}${timer}`;
+  const handleResend = async () => {
+    setResendLoading(true);
+    setError('');
+    try {
+      const { debugCode: nextDebugCode } = await sendOtp(authToken);
+      setDebugCode(nextDebugCode ?? '');
+      setResendTimer(RESEND_COOLDOWN);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(err.message);
+      } else {
+        setError('Failed to resend code. Please try again.');
+      }
+    } finally {
+      setResendLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    navigate('/login', { replace: true });
+  };
+
+  const formattedTimer = `00:${resendTimer < 10 ? '0' : ''}${resendTimer}`;
 
   return (
-    <main className="flex-grow flex items-center justify-center relative z-10 p-4 md:p-margin mt-10 md:mt-20">
-      {/* Floating Card */}
-      <div className="w-full max-w-[480px] bg-surface-container-lowest rounded-[14px] shadow-[0_20px_40px_-15px_rgba(0,0,0,0.04)] border border-outline-variant/40 p-12 flex flex-col relative soft-float">
-        
-        {/* Brand Mark */}
-        <div className="flex justify-center mb-8">
-          <span className="font-display-xl text-primary text-4xl italic">Protocol</span>
-        </div>
-        
+    <div className="min-h-screen flex items-center justify-center p-4 sm:p-8 relative z-10">
+      <div className="w-full max-w-md bg-surface-container-lowest/90 backdrop-blur-md p-10 md:p-14 rounded-[16px] shadow-[0_20px_40px_-15px_rgba(0,0,0,0.04)] border border-surface-variant relative overflow-hidden">
+
+        {/* Structural accent */}
+        <div className="absolute top-0 left-0 w-full h-px bg-outline-variant/30" />
+
         {/* Header */}
-        <div className="text-center mb-10">
-          <h1 className="font-headline-md text-headline-md text-on-surface mb-3">Verify Identity</h1>
-          <p className="font-body-md text-body-md text-on-surface-variant">
-            We've sent a 6-digit authentication code to your registered device.
+        <div className="mb-12 text-center">
+          <span className="font-ui-label text-ui-label text-on-surface-variant uppercase tracking-widest block mb-4">
+            Veritas Workspace
+          </span>
+          <h1 className="font-headline-lg text-4xl sm:text-5xl text-primary mt-2 leading-tight">
+            Verify Your Account.
+          </h1>
+          <p className="font-body-md text-body-md text-on-surface-variant mt-4">
+            A 6-digit code was sent to{' '}
+            <span className="text-on-surface font-medium">{user.email}</span>
           </p>
+          {import.meta.env.DEV && debugCode && (
+            <p className="mt-4 rounded-xl border border-outline-variant/40 bg-surface-container px-4 py-3 font-technical-mono text-technical-mono text-on-surface">
+              Development OTP preview: <span className="font-semibold tracking-[0.3em]">{debugCode}</span>
+            </p>
+          )}
         </div>
-        
-        {/* Verification Form */}
-        <div className={cn("flex flex-col gap-8 transition-all", error && "animate-shake")}>
-          {/* OTP Input Area */}
-          <div className="flex flex-col gap-4">
-            <label className="sr-only">One Time Password</label>
-            <div className="flex justify-between gap-2 md:gap-3">
-              {[0, 1, 2].map((index) => (
-                <input 
-                  key={`otp-${index}`}
-                  ref={(el) => (inputRefs.current[index] = el)}
+
+        {/* OTP inputs */}
+        <div className={cn('flex flex-col gap-8', error && 'animate-shake')}>
+          <div>
+            <label className="sr-only">One-time passcode</label>
+            <div className="flex justify-between gap-2 sm:gap-3">
+              {[0, 1, 2].map((i) => (
+                <input
+                  key={i}
+                  ref={(el) => { inputRefs.current[i] = el; }}
                   type="text"
                   inputMode="numeric"
                   maxLength={1}
-                  value={otp[index]}
-                  onChange={(e) => handleChange(index, e)}
-                  onKeyDown={(e) => handleKeyDown(index, e)}
+                  value={otp[i]}
+                  onChange={(e) => handleChange(i, e)}
+                  onKeyDown={(e) => handleKeyDown(i, e)}
                   onPaste={handlePaste}
+                  disabled={loading}
                   className={cn(
-                    "w-12 h-14 md:w-14 md:h-16 text-center font-technical-mono text-body-lg border-0 border-b bg-transparent focus:ring-0 transition-colors focus:bg-surface-container-low",
-                    error ? "border-error text-error focus:border-error" : "border-outline focus:border-primary"
+                    'flex-1 h-14 sm:h-16 text-center text-xl font-body-lg border-0 border-b-2 bg-transparent focus:outline-none transition-colors',
+                    error ? 'border-error text-error' : 'border-outline-variant focus:border-primary',
                   )}
                 />
               ))}
-              
-              <span className="flex items-center justify-center text-outline-variant w-4">-</span>
-              
-              {[3, 4, 5].map((index) => (
-                <input 
-                  key={`otp-${index}`}
-                  ref={(el) => (inputRefs.current[index] = el)}
+              <span className="flex items-center text-outline-variant text-xl select-none">-</span>
+              {[3, 4, 5].map((i) => (
+                <input
+                  key={i}
+                  ref={(el) => { inputRefs.current[i] = el; }}
                   type="text"
                   inputMode="numeric"
                   maxLength={1}
-                  value={otp[index]}
-                  onChange={(e) => handleChange(index, e)}
-                  onKeyDown={(e) => handleKeyDown(index, e)}
+                  value={otp[i]}
+                  onChange={(e) => handleChange(i, e)}
+                  onKeyDown={(e) => handleKeyDown(i, e)}
                   onPaste={handlePaste}
+                  disabled={loading}
                   className={cn(
-                    "w-12 h-14 md:w-14 md:h-16 text-center font-technical-mono text-body-lg border-0 border-b bg-transparent focus:ring-0 transition-colors focus:bg-surface-container-low",
-                    error ? "border-error text-error focus:border-error" : "border-outline focus:border-primary"
+                    'flex-1 h-14 sm:h-16 text-center text-xl font-body-lg border-0 border-b-2 bg-transparent focus:outline-none transition-colors',
+                    error ? 'border-error text-error' : 'border-outline-variant focus:border-primary',
                   )}
                 />
               ))}
             </div>
-            
-            {/* Error State Message */}
+
             {error && (
-              <div className="flex items-center gap-2 text-error mt-2">
-                <span className="material-symbols-outlined text-[16px]">error</span>
-                <p className="font-ui-label text-technical-mono">{error}</p>
-              </div>
+              <p className="font-technical-mono text-technical-mono text-error mt-3">
+                {error}
+              </p>
             )}
           </div>
-          
-          {/* Actions */}
-          <div className="flex flex-col gap-4 mt-4">
-            <button 
-              onClick={handleVerify}
-              disabled={loading || otp.join('').length !== 6}
-              className="w-full bg-primary text-on-primary font-ui-label text-ui-label rounded-full py-4 px-6 hover:bg-on-surface-variant transition-colors flex items-center justify-center gap-2 disabled:opacity-70"
-            >
-              {loading ? 'Verifying...' : 'Verify OTP'}
-              {!loading && <span className="material-symbols-outlined text-[16px]">arrow_forward</span>}
-            </button>
-            
-            <div className="flex justify-between items-center px-2">
-              <button 
-                type="button" 
-                onClick={() => navigate('/login')}
-                className="font-ui-label text-technical-mono text-on-surface-variant hover:text-primary transition-colors uppercase tracking-widest bg-transparent border-none cursor-pointer p-0"
+
+          {/* Verify button */}
+          <button
+            type="button"
+            onClick={handleVerify}
+            disabled={loading}
+            className="w-full bg-primary text-on-primary font-ui-label text-ui-label py-4 rounded-full hover:bg-tertiary-container transition-colors duration-200 flex items-center justify-center gap-2 disabled:opacity-60"
+          >
+            <span>{loading ? 'Verifying...' : 'Verify Code'}</span>
+            {!loading && <span className="material-symbols-outlined text-[18px]">verified_user</span>}
+          </button>
+
+          {/* Resend */}
+          <div className="text-center">
+            {resendTimer > 0 ? (
+              <p className="font-technical-mono text-technical-mono text-on-surface-variant">
+                Resend code in{' '}
+                <span className="text-on-surface tabular-nums">{formattedTimer}</span>
+              </p>
+            ) : (
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={resendLoading}
+                className="font-technical-mono text-technical-mono text-on-surface-variant hover:text-primary underline underline-offset-4 transition-colors disabled:opacity-60"
               >
-                Resend Code
+                {resendLoading ? 'Sending...' : 'Resend code'}
               </button>
-              <span className="font-technical-mono text-technical-mono text-outline">{formattedTimer}</span>
-            </div>
+            )}
+          </div>
+
+          {/* Switch account */}
+          <div className="text-center border-t border-surface-variant pt-6">
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="font-technical-mono text-technical-mono text-on-surface-variant hover:text-primary transition-colors"
+            >
+              Wrong account? Sign out
+            </button>
           </div>
         </div>
-        
-        {/* Contextual Link back to login */}
-        <div className="mt-12 text-center border-t border-outline-variant/30 pt-6">
-          <button 
-            onClick={() => navigate('/login')}
-            className="font-ui-label text-technical-mono text-on-surface-variant hover:text-primary transition-colors inline-flex items-center gap-1 uppercase tracking-widest"
-          >
-            <span className="material-symbols-outlined text-[14px]">arrow_back</span>
-            Return to Login
-          </button>
-        </div>
       </div>
-    </main>
+    </div>
   );
 }

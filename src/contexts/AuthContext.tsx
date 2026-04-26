@@ -1,54 +1,86 @@
 import React, { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { User, ConfirmationResult } from 'firebase/auth';
-import { auth } from '../firebase';
+import { User, onIdTokenChanged } from 'firebase/auth';
+import { auth, authPersistenceReady } from '../firebase';
 
 interface AuthContextType {
   user: User | null;
   authToken: string | null;
-  confirmationResult: ConfirmationResult | null;
-  setConfirmationResult: (result: ConfirmationResult | null) => void;
+  otpVerified: boolean;
+  setOtpVerified: (verified: boolean) => void;
   loading: boolean;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const AUTH_TOKEN_KEY = 'authToken';
+const otpVerifiedKey = (uid: string) => `otpVerified_${uid}`;
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [authToken, setAuthToken] = useState<string | null>(localStorage.getItem('authToken'));
-  const [confirmationResult, setConfirmationResult] = useState<ConfirmationResult | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(localStorage.getItem(AUTH_TOKEN_KEY));
+  const [otpVerified, setOtpVerifiedState] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    // onIdTokenChanged fires when the user signs in, signs out, or changing their token
-    const unsubscribe = auth.onIdTokenChanged(async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        try {
-          const token = await currentUser.getIdToken(true);
-          localStorage.setItem('authToken', token);
-          setAuthToken(token);
-        } catch (error) {
-          console.error("Error fetching token:", error);
-        }
+  const setOtpVerified = (verified: boolean) => {
+    setOtpVerifiedState(verified);
+    if (user) {
+      if (verified) {
+        localStorage.setItem(otpVerifiedKey(user.uid), 'true');
       } else {
-        localStorage.removeItem('authToken');
-        setAuthToken(null);
+        localStorage.removeItem(otpVerifiedKey(user.uid));
       }
-      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    let unsubscribe: (() => void) | undefined;
+
+    void authPersistenceReady.finally(() => {
+      if (!active) return;
+
+      unsubscribe = onIdTokenChanged(auth, async (currentUser) => {
+        setUser(currentUser);
+
+        if (currentUser) {
+          try {
+            const token = await currentUser.getIdToken(true);
+            localStorage.setItem(AUTH_TOKEN_KEY, token);
+            setAuthToken(token);
+            const verified = localStorage.getItem(otpVerifiedKey(currentUser.uid)) === 'true';
+            setOtpVerifiedState(verified);
+          } catch {
+            localStorage.removeItem(AUTH_TOKEN_KEY);
+            setAuthToken(null);
+            setOtpVerifiedState(false);
+          }
+        } else {
+          localStorage.removeItem(AUTH_TOKEN_KEY);
+          setAuthToken(null);
+          setOtpVerifiedState(false);
+        }
+
+        if (active) setLoading(false);
+      });
     });
 
-    return () => unsubscribe();
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
   }, []);
 
   const signOut = async () => {
+    if (user) localStorage.removeItem(otpVerifiedKey(user.uid));
     await auth.signOut();
-    localStorage.removeItem('authToken');
+    localStorage.removeItem(AUTH_TOKEN_KEY);
     setAuthToken(null);
+    setOtpVerifiedState(false);
   };
 
   return (
-    <AuthContext.Provider value={{ user, authToken, confirmationResult, setConfirmationResult, loading, signOut }}>
+    <AuthContext.Provider value={{ user, authToken, otpVerified, setOtpVerified, loading, signOut }}>
       {children}
     </AuthContext.Provider>
   );

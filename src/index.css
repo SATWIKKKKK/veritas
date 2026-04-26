@@ -129,6 +129,26 @@ input[type=number] {
   -moz-appearance: textfield;
 }
 
+/* Minimal bottom-border-only input used across auth screens */
+.input-minimal {
+  border: none;
+  border-bottom: 1px solid var(--color-outline-variant);
+  background-color: transparent;
+  padding-left: 0;
+  padding-right: 0;
+  padding-bottom: 0.75rem;
+  border-radius: 0;
+  width: 100%;
+}
+.input-minimal:focus {
+  outline: none;
+  box-shadow: none;
+  border-bottom-color: var(--color-primary);
+}
+.input-minimal:disabled {
+  opacity: 0.6;
+}
+
 /* Base styles to match the html document */
 html, body {
   -webkit-font-smoothing: antialiased;
